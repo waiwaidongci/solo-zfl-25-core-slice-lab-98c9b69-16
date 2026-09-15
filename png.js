@@ -16,7 +16,7 @@ const crcTable = (() => {
   return table;
 })();
 
-function crc32(buf) {
+export function crc32(buf) {
   let c = -1;
   for (let i = 0; i < buf.length; i++) c = crcTable[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
   return (c ^ -1) >>> 0;
@@ -124,6 +124,10 @@ export function decodePng(buf) {
   let width = 0, height = 0, bitDepth = 0, colorType = -1, interlace = 0;
   let palette = null, trns = null;
   const idat = [];
+  let sawIHDR = false;
+  let sawIEND = false;
+  let idatEnded = false;
+  let chunkIndex = 0;
   while (pos + 8 <= buf.length) {
     const len = buf.readUInt32BE(pos);
     const type = buf.toString("ascii", pos + 4, pos + 8);
@@ -134,18 +138,39 @@ export function decodePng(buf) {
       throw new Error("chunk_crc_mismatch");
     }
     pos += 12 + len;
+    chunkIndex++;
     if (type === "IHDR") {
+      if (chunkIndex !== 1 || sawIHDR) throw new Error("duplicate_ihdr");
+      sawIHDR = true;
       width = data.readUInt32BE(0);
       height = data.readUInt32BE(4);
       bitDepth = data[8];
       colorType = data[9];
       if (data[10] !== 0 || data[11] !== 0) throw new Error("unsupported_compression_or_filter");
       interlace = data[12];
-    } else if (type === "PLTE") palette = Buffer.from(data);
+      continue;
+    }
+    if (!sawIHDR) throw new Error("ihdr_not_first");
+    if (type === "IDAT") {
+      if (idatEnded) throw new Error("idat_not_consecutive");
+      idat.push(data);
+      continue;
+    }
+    if (type === "IEND") {
+      sawIEND = true;
+      break;
+    }
+    if (idat.length) idatEnded = true;
+    if (type === "PLTE") palette = Buffer.from(data);
     else if (type === "tRNS") trns = Buffer.from(data);
-    else if (type === "IDAT") idat.push(data);
-    else if (type === "IEND") break;
+    else {
+      // 关键分块（类型首字母大写）必须可识别，未知即拒绝；辅助分块（小写）忽略
+      const first = type.charCodeAt(0);
+      if (first >= 65 && first <= 90) throw new Error("unknown_critical_chunk_" + type);
+    }
   }
+  if (!sawIHDR) throw new Error("bad_header");
+  if (!sawIEND) throw new Error("missing_iend");
   if (!width || !height) throw new Error("bad_header");
   if (interlace !== 0) throw new Error("interlaced_png_not_supported");
   const channels = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[colorType];
@@ -161,7 +186,7 @@ export function decodePng(buf) {
   return { width, height, data };
 }
 
-function pngChunk(type, data) {
+export function pngChunk(type, data) {
   const len = Buffer.alloc(4);
   len.writeUInt32BE(data.length, 0);
   const name = Buffer.from(type, "ascii");

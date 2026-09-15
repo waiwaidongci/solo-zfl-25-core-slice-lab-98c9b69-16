@@ -112,6 +112,16 @@ try {
   await card.locator("button[data-upload]").click();
   await waitFor(async () => (await errBox.textContent())?.includes("校验和"));
   check("CRC 损坏拒绝并说明", (await errBox.textContent()).includes("校验和"));
+
+  await card.locator('input[type="file"]').setInputFiles(join(fixtures, "missing-iend.png"));
+  await card.locator("button[data-upload]").click();
+  await waitFor(async () => (await errBox.textContent())?.includes("结构损坏"));
+  check("缺少 IEND 拒绝并说明", (await errBox.textContent()).includes("缺少 IEND 结束分块"));
+
+  await card.locator('input[type="file"]').setInputFiles(join(fixtures, "split-idat.png"));
+  await card.locator("button[data-upload]").click();
+  await waitFor(async () => (await errBox.textContent())?.includes("隔开"));
+  check("IDAT 被隔开拒绝并说明", (await errBox.textContent()).includes("数据分块被其他分块隔开"));
   check("错误场景后无分析卡片", await card.locator(".an-card").count() === 0);
 
   // ---------- 上传、校准、统计 ----------

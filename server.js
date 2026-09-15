@@ -130,9 +130,20 @@ function parseImage(input) {
   try {
     img = decodePng(buf);
   } catch (error) {
-    if (error && error.message === "chunk_crc_mismatch") {
+    const code = error && error.message;
+    if (code === "chunk_crc_mismatch") {
       fail(400, "image_checksum_failed", "图像分块校验和错误：文件已损坏，请重新导出");
     }
+    const structural = {
+      missing_iend: "图像结构损坏：缺少 IEND 结束分块",
+      ihdr_not_first: "图像结构损坏：IHDR 头部未位于文件起始",
+      duplicate_ihdr: "图像结构损坏：出现重复的 IHDR 头部",
+      idat_not_consecutive: "图像结构损坏：数据分块被其他分块隔开"
+    };
+    if (code && code.startsWith("unknown_critical_chunk")) {
+      fail(400, "image_structure_invalid", "图像结构损坏：包含未知关键分块");
+    }
+    if (code && structural[code]) fail(400, "image_structure_invalid", structural[code]);
     fail(400, "image_decode_failed", "无法解析图像：仅支持非隔行扫描的 PNG 图像");
   }
   if (img.width < MIN_DIM || img.height < MIN_DIM || img.width > MAX_DIM || img.height > MAX_DIM) {

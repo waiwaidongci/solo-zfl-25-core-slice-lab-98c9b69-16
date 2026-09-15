@@ -31,7 +31,8 @@ async function req(method, path, body) {
 }
 const fixtures = {};
 async function loadFixtures() {
-  for (const name of ["grains.png", "mixed.png", "tiny.png", "not-a-png.png", "empty.png", "third.png", "corrupt-crc.png", "truncated.png"]) {
+  for (const name of ["grains.png", "mixed.png", "tiny.png", "not-a-png.png", "empty.png", "third.png", "corrupt-crc.png", "truncated.png",
+    "missing-iend.png", "duplicate-ihdr.png", "unknown-critical.png", "split-idat.png", "multi-idat.png", "ancillary-ok.png"]) {
     const buf = await readFile(join(__dirname, "fixtures", name));
     fixtures[name] = { buf, dataUrl: "data:image/png;base64," + buf.toString("base64") };
   }
@@ -224,6 +225,40 @@ try {
   check("恢复后合法图像可上传", r.status === 201, r.data);
   check("恢复后图像文件已写入", existsSync(join(uploadsDir, freshHash + ".png")));
 
+  // ---------- 结构回归：损坏 PNG 漏检 ----------
+  console.log("\n[结构回归：损坏 PNG]");
+  const structuralCases = [
+    ["missing-iend.png", "missing_iend", "缺少 IEND 结束分块"],
+    ["duplicate-ihdr.png", "duplicate_ihdr", "重复 IHDR 头部"],
+    ["unknown-critical.png", "unknown_critical_chunk_ACME", "未知关键分块"],
+    ["split-idat.png", "idat_not_consecutive", "IDAT 被其他分块隔开"]
+  ];
+  for (const [file, expectErr, label] of structuralCases) {
+    let threw = null;
+    try { decodePng(fixtures[file].buf); } catch (e) { threw = e.message; }
+    check(`解码器拒绝：${label}`, threw === expectErr, threw);
+  }
+  const countBeforeStruct = (await req("GET", `/api/samples/${sid}/slices/SL-T1/analyses`)).data.length;
+  for (const [file, , label] of structuralCases) {
+    r = await req("POST", `/api/samples/${sid}/slices/SL-T1/analyses`, { image: fixtures[file].dataUrl, threshold: 128, scale: { pixels: 100, microns: 500 } });
+    check(`${label} → 400 image_structure_invalid`, r.status === 400 && r.data.error === "image_structure_invalid", r.data);
+    const h = createHash("sha256").update(fixtures[file].buf).digest("hex");
+    check(`${label} → 未写入图像文件`, !existsSync(join(uploadsDir, h + ".png")));
+  }
+  r = await req("GET", `/api/samples/${sid}/slices/SL-T1/analyses`);
+  check("结构损坏未保存统计", r.data.length === countBeforeStruct, r.data.length);
+
+  console.log("\n[结构回归：合法 PNG 变体]");
+  let multiOk = false;
+  try { const im = decodePng(fixtures["multi-idat.png"].buf); multiOk = im.width === 320 && im.height === 220; } catch { multiOk = false; }
+  check("解码器接受连续多 IDAT", multiOk);
+  r = await req("POST", `/api/samples/${sid}/slices/SL-T1/analyses`, { image: fixtures["multi-idat.png"].dataUrl, name: "multi-idat.png", threshold: 128, scale: { pixels: 100, microns: 500 } });
+  check("连续多 IDAT 合法 PNG 接受", r.status === 201, r.data);
+  check("统计与单 IDAT 一致（5 颗粒）", r.data.analysis.result.grainCount === 5, r.data.analysis.result);
+  r = await req("POST", `/api/samples/${sid}/slices/SL-T1/analyses`, { image: fixtures["ancillary-ok.png"].dataUrl, name: "ancillary-ok.png", threshold: 128, scale: { pixels: 100, microns: 500 } });
+  check("自定义辅助分块合法 PNG 接受", r.status === 201, r.data);
+  check("辅助分块不影响统计（5 颗粒）", r.data.analysis.result.grainCount === 5, r.data.analysis.result);
+
   // ---------- 并发 ----------
   console.log("\n[并发]");
   const c = await req("POST", "/api/samples", { project: "并发矿", borehole: "ZK-9", coreBox: "B-9", depth: "30m", owner: "测试", sliceId: "SL-C1", method: "单偏光" });
@@ -274,7 +309,7 @@ try {
   console.log("\n[重启保留]");
   r = await req("GET", `/api/samples/${sid}/slices/SL-T1/analyses`);
   const beforeRestart = r.data;
-  check("重启前 SL-T1 有 4 条分析", beforeRestart.length === 4, beforeRestart.length);
+  check("重启前 SL-T1 有 6 条分析", beforeRestart.length === 6, beforeRestart.length);
   await stopServer();
   await startServer();
   r = await req("GET", `/api/samples/${sid}/slices/SL-T1/analyses`);
