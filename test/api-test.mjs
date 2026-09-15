@@ -32,7 +32,8 @@ async function req(method, path, body) {
 const fixtures = {};
 async function loadFixtures() {
   for (const name of ["grains.png", "mixed.png", "tiny.png", "not-a-png.png", "empty.png", "third.png", "corrupt-crc.png", "truncated.png",
-    "missing-iend.png", "duplicate-ihdr.png", "unknown-critical.png", "split-idat.png", "multi-idat.png", "ancillary-ok.png"]) {
+    "missing-iend.png", "duplicate-ihdr.png", "unknown-critical.png", "split-idat.png", "multi-idat.png", "ancillary-ok.png",
+    "iend-with-data.png", "trailing-chunk.png", "trailing-garbage.png", "duplicate-plte.png", "plte-after-idat.png", "duplicate-trns.png", "plte-ok.png", "trns-ok.png"]) {
     const buf = await readFile(join(__dirname, "fixtures", name));
     fixtures[name] = { buf, dataUrl: "data:image/png;base64," + buf.toString("base64") };
   }
@@ -259,6 +260,43 @@ try {
   check("自定义辅助分块合法 PNG 接受", r.status === 201, r.data);
   check("辅助分块不影响统计（5 颗粒）", r.data.analysis.result.grainCount === 5, r.data.analysis.result);
 
+  console.log("\n[结构回归：结束分块 / 调色板 / 透明信息]");
+  const structuralCases2 = [
+    ["iend-with-data.png", "iend_not_empty", "IEND 含内容"],
+    ["trailing-chunk.png", "data_after_iend", "IEND 后还有分块"],
+    ["trailing-garbage.png", "data_after_iend", "IEND 后有多余数据"],
+    ["duplicate-plte.png", "duplicate_plte", "调色板重复"],
+    ["plte-after-idat.png", "plte_after_idat", "调色板晚于图像数据"],
+    ["duplicate-trns.png", "duplicate_trns", "透明信息重复"]
+  ];
+  for (const [file, expectErr, label] of structuralCases2) {
+    let threw = null;
+    try { decodePng(fixtures[file].buf); } catch (e) { threw = e.message; }
+    check(`解码器拒绝：${label}`, threw === expectErr, threw);
+  }
+  const countBeforeStruct2 = (await req("GET", `/api/samples/${sid}/slices/SL-T1/analyses`)).data.length;
+  for (const [file, , label] of structuralCases2) {
+    r = await req("POST", `/api/samples/${sid}/slices/SL-T1/analyses`, { image: fixtures[file].dataUrl, threshold: 128, scale: { pixels: 100, microns: 500 } });
+    check(`${label} → 400 image_structure_invalid`, r.status === 400 && r.data.error === "image_structure_invalid", r.data);
+    const h = createHash("sha256").update(fixtures[file].buf).digest("hex");
+    check(`${label} → 未写入图像文件`, !existsSync(join(uploadsDir, h + ".png")));
+  }
+  r = await req("GET", `/api/samples/${sid}/slices/SL-T1/analyses`);
+  check("第二批结构损坏未保存统计", r.data.length === countBeforeStruct2, r.data.length);
+
+  console.log("\n[结构回归：合法调色板 / 透明信息]");
+  for (const f of ["plte-ok.png", "trns-ok.png"]) {
+    let ok = false;
+    try { const im = decodePng(fixtures[f].buf); ok = im.width === 320 && im.height === 220; } catch { ok = false; }
+    check(`解码器接受 ${f}`, ok);
+  }
+  r = await req("POST", `/api/samples/${sid}/slices/SL-T1/analyses`, { image: fixtures["plte-ok.png"].dataUrl, name: "plte-ok.png", threshold: 128, scale: { pixels: 100, microns: 500 } });
+  check("建议调色板合法 PNG 接受", r.status === 201, r.data);
+  check("调色板不影响统计（5 颗粒）", r.data.analysis.result.grainCount === 5, r.data.analysis.result);
+  r = await req("POST", `/api/samples/${sid}/slices/SL-T1/analyses`, { image: fixtures["trns-ok.png"].dataUrl, name: "trns-ok.png", threshold: 128, scale: { pixels: 100, microns: 500 } });
+  check("透明信息合法 PNG 接受", r.status === 201, r.data);
+  check("透明信息不影响统计（5 颗粒）", r.data.analysis.result.grainCount === 5, r.data.analysis.result);
+
   // ---------- 并发 ----------
   console.log("\n[并发]");
   const c = await req("POST", "/api/samples", { project: "并发矿", borehole: "ZK-9", coreBox: "B-9", depth: "30m", owner: "测试", sliceId: "SL-C1", method: "单偏光" });
@@ -309,7 +347,7 @@ try {
   console.log("\n[重启保留]");
   r = await req("GET", `/api/samples/${sid}/slices/SL-T1/analyses`);
   const beforeRestart = r.data;
-  check("重启前 SL-T1 有 6 条分析", beforeRestart.length === 6, beforeRestart.length);
+  check("重启前 SL-T1 有 8 条分析", beforeRestart.length === 8, beforeRestart.length);
   await stopServer();
   await startServer();
   r = await req("GET", `/api/samples/${sid}/slices/SL-T1/analyses`);

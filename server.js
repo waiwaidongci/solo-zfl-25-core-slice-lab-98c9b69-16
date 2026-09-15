@@ -136,8 +136,13 @@ function parseImage(input) {
     }
     const structural = {
       missing_iend: "图像结构损坏：缺少 IEND 结束分块",
+      iend_not_empty: "图像结构损坏：IEND 结束分块包含内容",
+      data_after_iend: "图像结构损坏：IEND 结束后仍存在分块或多余数据",
       ihdr_not_first: "图像结构损坏：IHDR 头部未位于文件起始",
       duplicate_ihdr: "图像结构损坏：出现重复的 IHDR 头部",
+      duplicate_plte: "图像结构损坏：调色板分块重复",
+      plte_after_idat: "图像结构损坏：调色板分块晚于图像数据",
+      duplicate_trns: "图像结构损坏：透明信息分块重复",
       idat_not_consecutive: "图像结构损坏：数据分块被其他分块隔开"
     };
     if (code && code.startsWith("unknown_critical_chunk")) {

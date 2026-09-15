@@ -157,13 +157,19 @@ export function decodePng(buf) {
       continue;
     }
     if (type === "IEND") {
+      if (len !== 0) throw new Error("iend_not_empty");
       sawIEND = true;
       break;
     }
     if (idat.length) idatEnded = true;
-    if (type === "PLTE") palette = Buffer.from(data);
-    else if (type === "tRNS") trns = Buffer.from(data);
-    else {
+    if (type === "PLTE") {
+      if (palette) throw new Error("duplicate_plte");
+      if (idat.length) throw new Error("plte_after_idat");
+      palette = Buffer.from(data);
+    } else if (type === "tRNS") {
+      if (trns) throw new Error("duplicate_trns");
+      trns = Buffer.from(data);
+    } else {
       // 关键分块（类型首字母大写）必须可识别，未知即拒绝；辅助分块（小写）忽略
       const first = type.charCodeAt(0);
       if (first >= 65 && first <= 90) throw new Error("unknown_critical_chunk_" + type);
@@ -171,6 +177,7 @@ export function decodePng(buf) {
   }
   if (!sawIHDR) throw new Error("bad_header");
   if (!sawIEND) throw new Error("missing_iend");
+  if (pos !== buf.length) throw new Error("data_after_iend");
   if (!width || !height) throw new Error("bad_header");
   if (interlace !== 0) throw new Error("interlaced_png_not_supported");
   const channels = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[colorType];

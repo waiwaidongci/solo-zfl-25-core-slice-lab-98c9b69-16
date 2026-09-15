@@ -122,6 +122,16 @@ try {
   await card.locator("button[data-upload]").click();
   await waitFor(async () => (await errBox.textContent())?.includes("隔开"));
   check("IDAT 被隔开拒绝并说明", (await errBox.textContent()).includes("数据分块被其他分块隔开"));
+
+  await card.locator('input[type="file"]').setInputFiles(join(fixtures, "iend-with-data.png"));
+  await card.locator("button[data-upload]").click();
+  await waitFor(async () => (await errBox.textContent())?.includes("结束分块包含内容"));
+  check("IEND 含内容拒绝并说明", (await errBox.textContent()).includes("IEND 结束分块包含内容"));
+
+  await card.locator('input[type="file"]').setInputFiles(join(fixtures, "duplicate-plte.png"));
+  await card.locator("button[data-upload]").click();
+  await waitFor(async () => (await errBox.textContent())?.includes("调色板"));
+  check("调色板重复拒绝并说明", (await errBox.textContent()).includes("调色板分块重复"));
   check("错误场景后无分析卡片", await card.locator(".an-card").count() === 0);
 
   // ---------- 上传、校准、统计 ----------
