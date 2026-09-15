@@ -130,7 +130,19 @@ export function decodePng(buf) {
   let chunkIndex = 0;
   while (pos + 8 <= buf.length) {
     const len = buf.readUInt32BE(pos);
-    const type = buf.toString("ascii", pos + 4, pos + 8);
+    const typeBytes = buf.subarray(pos + 4, pos + 8);
+    const type = typeBytes.toString("ascii");
+    // 分块类型须为 4 个英文字母，且第三字母（保留位）大写
+    let typeValid = true;
+    for (let i = 0; i < 4; i++) {
+      const c = typeBytes[i];
+      const isLetter = (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+      if (!isLetter || (i === 2 && (c < 65 || c > 90))) {
+        typeValid = false;
+        break;
+      }
+    }
+    if (!typeValid) throw new Error("invalid_chunk_type");
     if (pos + 12 + len > buf.length) throw new Error("truncated_chunk");
     const data = buf.subarray(pos + 8, pos + 8 + len);
     const expectedCrc = buf.readUInt32BE(pos + 8 + len);
@@ -165,9 +177,20 @@ export function decodePng(buf) {
     if (type === "PLTE") {
       if (palette) throw new Error("duplicate_plte");
       if (idat.length) throw new Error("plte_after_idat");
+      // 长度为 3 的倍数、1–256 条目；调色板图像不得超过位深允许上限
+      if (len === 0 || len % 3 !== 0 || len > 768) throw new Error("invalid_plte_length");
+      if (colorType === 3 && len / 3 > (1 << bitDepth)) throw new Error("invalid_plte_length");
       palette = Buffer.from(data);
     } else if (type === "tRNS") {
       if (trns) throw new Error("duplicate_trns");
+      if (idat.length) throw new Error("trns_after_idat");
+      // 含 alpha 通道的颜色类型禁止 tRNS；其余类型长度须匹配
+      if (colorType === 4 || colorType === 6) throw new Error("trns_not_allowed");
+      if (colorType === 0 && len !== 2) throw new Error("invalid_trns_length");
+      if (colorType === 2 && len !== 6) throw new Error("invalid_trns_length");
+      if (colorType === 3 && (len === 0 || len > 256 || (palette && len > palette.length / 3))) {
+        throw new Error("invalid_trns_length");
+      }
       trns = Buffer.from(data);
     } else {
       // 关键分块（类型首字母大写）必须可识别，未知即拒绝；辅助分块（小写）忽略

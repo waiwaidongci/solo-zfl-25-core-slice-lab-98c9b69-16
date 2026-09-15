@@ -132,6 +132,16 @@ try {
   await card.locator("button[data-upload]").click();
   await waitFor(async () => (await errBox.textContent())?.includes("调色板"));
   check("调色板重复拒绝并说明", (await errBox.textContent()).includes("调色板分块重复"));
+
+  await card.locator('input[type="file"]').setInputFiles(join(fixtures, "bad-type-reserved.png"));
+  await card.locator("button[data-upload]").click();
+  await waitFor(async () => (await errBox.textContent())?.includes("分块类型非法"));
+  check("分块类型非法拒绝并说明", (await errBox.textContent()).includes("分块类型非法"));
+
+  await card.locator('input[type="file"]').setInputFiles(join(fixtures, "trns-after-idat.png"));
+  await card.locator("button[data-upload]").click();
+  await waitFor(async () => (await errBox.textContent())?.includes("透明信息"));
+  check("透明信息晚于图像数据拒绝并说明", (await errBox.textContent()).includes("透明信息分块晚于图像数据"));
   check("错误场景后无分析卡片", await card.locator(".an-card").count() === 0);
 
   // ---------- 上传、校准、统计 ----------

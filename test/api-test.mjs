@@ -33,7 +33,9 @@ const fixtures = {};
 async function loadFixtures() {
   for (const name of ["grains.png", "mixed.png", "tiny.png", "not-a-png.png", "empty.png", "third.png", "corrupt-crc.png", "truncated.png",
     "missing-iend.png", "duplicate-ihdr.png", "unknown-critical.png", "split-idat.png", "multi-idat.png", "ancillary-ok.png",
-    "iend-with-data.png", "trailing-chunk.png", "trailing-garbage.png", "duplicate-plte.png", "plte-after-idat.png", "duplicate-trns.png", "plte-ok.png", "trns-ok.png"]) {
+    "iend-with-data.png", "trailing-chunk.png", "trailing-garbage.png", "duplicate-plte.png", "plte-after-idat.png", "duplicate-trns.png", "plte-ok.png",
+    "bad-type-digit.png", "bad-type-reserved.png", "plte-len-mod.png", "plte-len-max.png",
+    "trns-after-idat.png", "trns-on-alpha.png", "trns-len-rgb.png", "trns-len-palette.png", "rgb-trns-ok.png", "palette-ok.png"]) {
     const buf = await readFile(join(__dirname, "fixtures", name));
     fixtures[name] = { buf, dataUrl: "data:image/png;base64," + buf.toString("base64") };
   }
@@ -285,7 +287,7 @@ try {
   check("第二批结构损坏未保存统计", r.data.length === countBeforeStruct2, r.data.length);
 
   console.log("\n[结构回归：合法调色板 / 透明信息]");
-  for (const f of ["plte-ok.png", "trns-ok.png"]) {
+  for (const f of ["plte-ok.png"]) {
     let ok = false;
     try { const im = decodePng(fixtures[f].buf); ok = im.width === 320 && im.height === 220; } catch { ok = false; }
     check(`解码器接受 ${f}`, ok);
@@ -293,9 +295,45 @@ try {
   r = await req("POST", `/api/samples/${sid}/slices/SL-T1/analyses`, { image: fixtures["plte-ok.png"].dataUrl, name: "plte-ok.png", threshold: 128, scale: { pixels: 100, microns: 500 } });
   check("建议调色板合法 PNG 接受", r.status === 201, r.data);
   check("调色板不影响统计（5 颗粒）", r.data.analysis.result.grainCount === 5, r.data.analysis.result);
-  r = await req("POST", `/api/samples/${sid}/slices/SL-T1/analyses`, { image: fixtures["trns-ok.png"].dataUrl, name: "trns-ok.png", threshold: 128, scale: { pixels: 100, microns: 500 } });
-  check("透明信息合法 PNG 接受", r.status === 201, r.data);
-  check("透明信息不影响统计（5 颗粒）", r.data.analysis.result.grainCount === 5, r.data.analysis.result);
+
+  console.log("\n[结构回归：分块内容校验]");
+  const contentCases = [
+    ["bad-type-digit.png", "invalid_chunk_type", "分块类型含数字"],
+    ["bad-type-reserved.png", "invalid_chunk_type", "分块类型保留位非法"],
+    ["plte-len-mod.png", "invalid_plte_length", "调色板长度非 3 倍数"],
+    ["plte-len-max.png", "invalid_plte_length", "调色板长度超上限"],
+    ["trns-after-idat.png", "trns_after_idat", "透明信息晚于图像数据"],
+    ["trns-on-alpha.png", "trns_not_allowed", "透明信息用于含 alpha 颜色类型"],
+    ["trns-len-rgb.png", "invalid_trns_length", "透明信息长度与 RGB 不符"],
+    ["trns-len-palette.png", "invalid_trns_length", "透明信息长度超调色板条目"]
+  ];
+  for (const [file, expectErr, label] of contentCases) {
+    let threw = null;
+    try { decodePng(fixtures[file].buf); } catch (e) { threw = e.message; }
+    check(`解码器拒绝：${label}`, threw === expectErr, threw);
+  }
+  const countBeforeContent = (await req("GET", `/api/samples/${sid}/slices/SL-T1/analyses`)).data.length;
+  for (const [file, , label] of contentCases) {
+    r = await req("POST", `/api/samples/${sid}/slices/SL-T1/analyses`, { image: fixtures[file].dataUrl, threshold: 128, scale: { pixels: 100, microns: 500 } });
+    check(`${label} → 400 image_structure_invalid`, r.status === 400 && r.data.error === "image_structure_invalid", r.data);
+    const h = createHash("sha256").update(fixtures[file].buf).digest("hex");
+    check(`${label} → 未写入图像文件`, !existsSync(join(uploadsDir, h + ".png")));
+  }
+  r = await req("GET", `/api/samples/${sid}/slices/SL-T1/analyses`);
+  check("内容校验损坏未保存统计", r.data.length === countBeforeContent, r.data.length);
+
+  console.log("\n[结构回归：合法 RGB / 调色板透明信息]");
+  for (const f of ["rgb-trns-ok.png", "palette-ok.png"]) {
+    let ok = false;
+    try { const im = decodePng(fixtures[f].buf); ok = im.width === 320 && im.height === 220; } catch { ok = false; }
+    check(`解码器接受 ${f}`, ok);
+  }
+  r = await req("POST", `/api/samples/${sid}/slices/SL-T1/analyses`, { image: fixtures["rgb-trns-ok.png"].dataUrl, name: "rgb-trns-ok.png", threshold: 128, scale: { pixels: 100, microns: 500 } });
+  check("RGB+透明信息合法 PNG 接受", r.status === 201, r.data);
+  check("统计一致（5 颗粒）", r.data.analysis.result.grainCount === 5, r.data.analysis.result);
+  r = await req("POST", `/api/samples/${sid}/slices/SL-T1/analyses`, { image: fixtures["palette-ok.png"].dataUrl, name: "palette-ok.png", threshold: 128, scale: { pixels: 100, microns: 500 } });
+  check("调色板+透明信息合法 PNG 接受", r.status === 201, r.data);
+  check("统计一致（5 颗粒）", r.data.analysis.result.grainCount === 5, r.data.analysis.result);
 
   // ---------- 并发 ----------
   console.log("\n[并发]");
@@ -347,7 +385,7 @@ try {
   console.log("\n[重启保留]");
   r = await req("GET", `/api/samples/${sid}/slices/SL-T1/analyses`);
   const beforeRestart = r.data;
-  check("重启前 SL-T1 有 8 条分析", beforeRestart.length === 8, beforeRestart.length);
+  check("重启前 SL-T1 有 9 条分析", beforeRestart.length === 9, beforeRestart.length);
   await stopServer();
   await startServer();
   r = await req("GET", `/api/samples/${sid}/slices/SL-T1/analyses`);
