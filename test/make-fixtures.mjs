@@ -48,10 +48,26 @@ dot(m, 90, 170, 12, 110);
 // tiny.png：4×4，尺寸异常
 const t = canvas(4, 4);
 
+// third.png：另一组合法颗粒（保存失败测试用的新图像）
+const h3 = canvas(200, 140);
+dot(h3, 50, 50, 14, 30);
+dot(h3, 130, 80, 20, 25);
+
 await mkdir(outDir, { recursive: true });
-await writeFile(join(outDir, "grains.png"), encodePng(g.width, g.height, g.data));
+const grainsBuf = encodePng(g.width, g.height, g.data);
+await writeFile(join(outDir, "grains.png"), grainsBuf);
 await writeFile(join(outDir, "mixed.png"), encodePng(m.width, m.height, m.data));
 await writeFile(join(outDir, "tiny.png"), encodePng(t.width, t.height, t.data));
+await writeFile(join(outDir, "third.png"), encodePng(h3.width, h3.height, h3.data));
 await writeFile(join(outDir, "not-a-png.png"), Buffer.from("this is definitely not a png file"));
 await writeFile(join(outDir, "empty.png"), Buffer.alloc(0));
+
+// corrupt-crc.png：IDAT 数据区翻转一字节，分块 CRC 不变 → 校验和错误
+const corrupt = Buffer.from(grainsBuf);
+const idatPos = corrupt.indexOf(Buffer.from("IDAT"));
+corrupt[idatPos + 14] ^= 0xff;
+await writeFile(join(outDir, "corrupt-crc.png"), corrupt);
+
+// truncated.png：尾部截断
+await writeFile(join(outDir, "truncated.png"), grainsBuf.subarray(0, grainsBuf.length - 20));
 console.log("fixtures written to", outDir);

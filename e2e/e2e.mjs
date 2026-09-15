@@ -2,7 +2,7 @@
 // 重复上传去重 → 修改阈值/标尺重算 → 非法修改报错且旧结果保留 →
 // 旧入口（交付）→ 重启后页面仍显示完整结果。
 import { spawn } from "node:child_process";
-import { mkdtemp, rm, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -107,6 +107,11 @@ try {
   await card.locator("button[data-upload]").click();
   await waitFor(async () => (await errBox.textContent())?.includes("无法解析"));
   check("非 PNG 拒绝并说明", (await errBox.textContent()).includes("无法解析"));
+
+  await card.locator('input[type="file"]').setInputFiles(join(fixtures, "corrupt-crc.png"));
+  await card.locator("button[data-upload]").click();
+  await waitFor(async () => (await errBox.textContent())?.includes("校验和"));
+  check("CRC 损坏拒绝并说明", (await errBox.textContent()).includes("校验和"));
   check("错误场景后无分析卡片", await card.locator(".an-card").count() === 0);
 
   // ---------- 上传、校准、统计 ----------
@@ -187,6 +192,33 @@ try {
   const imgOk2 = await card2.locator(".an-card img").evaluate(el => el.complete && el.naturalWidth > 0);
   check("重启后图像仍可显示", imgOk2);
   await page.screenshot({ path: join(__dirname, "shots", "4-after-restart.png"), fullPage: true });
+
+  // ---------- 恶意名称：只能作为纯文本显示 ----------
+  console.log("\n[浏览器：恶意名称渲染]");
+  let dialogFired = false;
+  page.on("dialog", async d => { dialogFired = true; await d.dismiss(); });
+  const xssName = '<img src=x onerror="window.__xss=1"><script>window.__xss2=1</script>';
+  const samplesRes = await fetch(`${base}/api/samples`);
+  const sample = (await samplesRes.json()).find(s => s.project === "西沟金矿薄片");
+  const grainsB64 = await readFile(join(fixtures, "grains.png")).then(b => "data:image/png;base64," + b.toString("base64"));
+  const up = await fetch(`${base}/api/samples/${sample.id}/slices/SL-E2E-1/analyses`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image: grainsB64, name: xssName, threshold: 128, scale: { pixels: 100, microns: 500 } })
+  });
+  check("恶意名称上传成功", up.status === 201 || up.status === 200, up.status);
+  await page.reload({ waitUntil: "networkidle" });
+  const card3 = page.locator(".card", { hasText: "西沟金矿薄片" });
+  await waitFor(() => card3.locator(".an-card").count());
+  const nameEl = card3.locator(".an-card b").first();
+  check("名称以纯文本显示", (await nameEl.textContent()).includes("<img src=x onerror"), await nameEl.textContent());
+  check("未注入 img 元素", await card3.locator('.an-card img[src="x"]').count() === 0);
+  check("未注入 script 元素", await card3.locator(".an-card script").count() === 0);
+  check("onerror 未执行", await page.evaluate(() => window.__xss) === undefined);
+  check("script 未执行", await page.evaluate(() => window.__xss2) === undefined);
+  check("无弹窗", dialogFired === false);
+  check("分析结果仍完整", (await card3.locator(".an-stats div", { hasText: "颗粒数" }).first().locator("strong").textContent()).trim() === "5");
+  await page.screenshot({ path: join(__dirname, "shots", "5-xss-name.png"), fullPage: true });
 } catch (error) {
   failed++;
   console.error("FATAL", error);

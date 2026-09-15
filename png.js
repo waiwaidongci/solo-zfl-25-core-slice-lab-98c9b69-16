@@ -129,6 +129,10 @@ export function decodePng(buf) {
     const type = buf.toString("ascii", pos + 4, pos + 8);
     if (pos + 12 + len > buf.length) throw new Error("truncated_chunk");
     const data = buf.subarray(pos + 8, pos + 8 + len);
+    const expectedCrc = buf.readUInt32BE(pos + 8 + len);
+    if (crc32(Buffer.concat([Buffer.from(type, "ascii"), data])) !== expectedCrc) {
+      throw new Error("chunk_crc_mismatch");
+    }
     pos += 12 + len;
     if (type === "IHDR") {
       width = data.readUInt32BE(0);

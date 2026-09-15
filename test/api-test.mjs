@@ -2,11 +2,12 @@
 // 使用独立临时数据目录与端口，不污染正式数据。
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile, copyFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile, copyFile, chmod } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { decodePng } from "../png.js";
+import { decodePng, encodePng } from "../png.js";
 import { analyzeGrains } from "../analysis.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -30,7 +31,7 @@ async function req(method, path, body) {
 }
 const fixtures = {};
 async function loadFixtures() {
-  for (const name of ["grains.png", "mixed.png", "tiny.png", "not-a-png.png", "empty.png"]) {
+  for (const name of ["grains.png", "mixed.png", "tiny.png", "not-a-png.png", "empty.png", "third.png", "corrupt-crc.png", "truncated.png"]) {
     const buf = await readFile(join(__dirname, "fixtures", name));
     fixtures[name] = { buf, dataUrl: "data:image/png;base64," + buf.toString("base64") };
   }
@@ -167,6 +168,62 @@ try {
   r = await req("PATCH", `/api/analyses/${mixed.id}`, { threshold: 100 });
   check("图像恢复后可重算", r.status === 200 && r.data.analysis.threshold === 100, r.data);
 
+  // ---------- 边界回归：恶意名称 / 损坏图像 / 保存失败 ----------
+  console.log("\n[边界回归：恶意名称]");
+  const xssName = '<img src=x onerror="window.__xss=1"><script>window.__xss2=1</script>';
+  r = await req("POST", `/api/samples/${sid}/slices/SL-T1/analyses`, { image: fixtures["third.png"].dataUrl, name: xssName, threshold: 128, scale: { pixels: 100, microns: 500 } });
+  check("恶意名称上传成功", r.status === 201, r.data);
+  check("名称原样存储（显示侧转义由页面保证）", r.data.analysis.imageName === xssName, r.data.analysis.imageName);
+  r = await req("POST", `/api/samples/${sid}/slices/SL-T1/analyses`, { image: fixtures["third.png"].dataUrl, name: "A".repeat(500), threshold: 128, scale: { pixels: 100, microns: 500 } });
+  check("超长名称截断到 200 字符", r.status === 200 && r.data.analysis.imageName.length === 200, r.data.analysis?.imageName?.length);
+  const homeHtml = await (await fetch(base + "/")).text();
+  check("首页 HTML 不含注入脚本", !homeHtml.includes("<script>window.__xss2"));
+
+  console.log("\n[边界回归：损坏图像]");
+  let crcThrew = false;
+  try { decodePng(fixtures["corrupt-crc.png"].buf); } catch (e) { crcThrew = e.message === "chunk_crc_mismatch"; }
+  check("解码器逐分块校验 CRC", crcThrew);
+  const countBeforeCorrupt = (await req("GET", `/api/samples/${sid}/slices/SL-T1/analyses`)).data.length;
+  r = await req("POST", `/api/samples/${sid}/slices/SL-T1/analyses`, { image: fixtures["corrupt-crc.png"].dataUrl, threshold: 128, scale: { pixels: 100, microns: 500 } });
+  check("CRC 错误拒绝并说明", r.status === 400 && r.data.error === "image_checksum_failed", r.data);
+  r = await req("POST", `/api/samples/${sid}/slices/SL-T1/analyses`, { image: fixtures["truncated.png"].dataUrl, threshold: 128, scale: { pixels: 100, microns: 500 } });
+  check("截断图像拒绝", r.status === 400 && ["image_decode_failed", "image_checksum_failed"].includes(r.data.error), r.data);
+  r = await req("GET", `/api/samples/${sid}/slices/SL-T1/analyses`);
+  check("损坏图像未保存统计", r.data.length === countBeforeCorrupt, r.data.length);
+  const corruptHash = createHash("sha256").update(fixtures["corrupt-crc.png"].buf).digest("hex");
+  check("损坏图像未写入文件", !existsSync(join(uploadsDir, corruptHash + ".png")));
+
+  console.log("\n[边界回归：保存失败]");
+  const freshData = Buffer.alloc(120 * 90 * 4, 255);
+  for (let y = 0; y < 90; y++) for (let x = 0; x < 120; x++) {
+    if ((x - 60) ** 2 + (y - 45) ** 2 <= 100) { const o = (y * 120 + x) * 4; freshData[o] = 30; freshData[o + 1] = 30; freshData[o + 2] = 30; }
+  }
+  const freshBuf = encodePng(120, 90, freshData);
+  const freshUrl = "data:image/png;base64," + freshBuf.toString("base64");
+  const freshHash = createHash("sha256").update(freshBuf).digest("hex");
+  const grainsHash = createHash("sha256").update(fixtures["grains.png"].buf).digest("hex");
+  await chmod(workDir, 0o555);
+  r = await req("POST", `/api/samples/${sid}/slices/SL-T1/analyses`, { image: freshUrl, threshold: 128, scale: { pixels: 100, microns: 500 } });
+  check("记录保存失败返回 500 save_failed", r.status === 500 && r.data.error === "save_failed", r.data);
+  check("新图像不留孤立文件", !existsSync(join(uploadsDir, freshHash + ".png")));
+  r = await req("GET", `/api/samples/${sid}/slices/SL-T1/analyses`);
+  check("保存失败后记录数不变", r.data.length === countBeforeCorrupt, r.data.length);
+  const grainsBefore = r.data.find(a => a.imageHash === grainsHash);
+  r = await req("POST", `/api/samples/${sid}/slices/SL-T1/analyses`, { image: fixtures["grains.png"].dataUrl, threshold: 30, scale: { pixels: 100, microns: 500 } });
+  check("去重重算保存失败 500", r.status === 500 && r.data.error === "save_failed", r.data);
+  check("已有图像文件未被删除", existsSync(join(uploadsDir, grainsHash + ".png")));
+  r = await req("GET", `/api/samples/${sid}/slices/SL-T1/analyses`);
+  const grainsAfter = r.data.find(a => a.imageHash === grainsHash);
+  check("已有结果未被改变", grainsAfter.threshold === grainsBefore.threshold && grainsAfter.result.grainCount === grainsBefore.result.grainCount, grainsAfter);
+  r = await req("PATCH", `/api/analyses/${grainsBefore.id}`, { threshold: 40 });
+  check("PATCH 保存失败 500", r.status === 500 && r.data.error === "save_failed", r.data);
+  r = await req("GET", `/api/samples/${sid}/slices/SL-T1/analyses`);
+  check("PATCH 失败后记录不变", r.data.find(a => a.id === grainsBefore.id).threshold === grainsBefore.threshold);
+  await chmod(workDir, 0o755);
+  r = await req("POST", `/api/samples/${sid}/slices/SL-T1/analyses`, { image: freshUrl, threshold: 128, scale: { pixels: 100, microns: 500 } });
+  check("恢复后合法图像可上传", r.status === 201, r.data);
+  check("恢复后图像文件已写入", existsSync(join(uploadsDir, freshHash + ".png")));
+
   // ---------- 并发 ----------
   console.log("\n[并发]");
   const c = await req("POST", "/api/samples", { project: "并发矿", borehole: "ZK-9", coreBox: "B-9", depth: "30m", owner: "测试", sliceId: "SL-C1", method: "单偏光" });
@@ -217,11 +274,11 @@ try {
   console.log("\n[重启保留]");
   r = await req("GET", `/api/samples/${sid}/slices/SL-T1/analyses`);
   const beforeRestart = r.data;
-  check("重启前 SL-T1 有 2 条分析", beforeRestart.length === 2, beforeRestart.length);
+  check("重启前 SL-T1 有 4 条分析", beforeRestart.length === 4, beforeRestart.length);
   await stopServer();
   await startServer();
   r = await req("GET", `/api/samples/${sid}/slices/SL-T1/analyses`);
-  check("重启后分析记录仍在", r.status === 200 && r.data.length === 2 && r.data.every(a => beforeRestart.some(b => b.id === a.id && b.result.grainCount === a.result.grainCount)), r.data);
+  check("重启后分析记录仍在", r.status === 200 && r.data.length === beforeRestart.length && r.data.every(a => beforeRestart.some(b => b.id === a.id && b.result.grainCount === a.result.grainCount)), r.data);
   const hash = beforeRestart[0].imageHash;
   const imgRes = await fetch(`${base}/uploads/${hash}.png`);
   check("重启后图像文件可访问", imgRes.status === 200 && imgRes.headers.get("content-type") === "image/png", imgRes.status);
@@ -244,6 +301,7 @@ try {
   console.error("FATAL", error);
 } finally {
   await stopServer();
+  await chmod(workDir, 0o755).catch(() => {});
   await rm(workDir, { recursive: true, force: true });
 }
 console.log(`\n${passed} passed, ${failed} failed`);

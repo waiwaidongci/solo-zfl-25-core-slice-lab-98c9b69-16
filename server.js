@@ -1,5 +1,5 @@
 import http from "node:http";
-import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
+import { mkdir, readFile, writeFile, rename, unlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
@@ -129,7 +129,10 @@ function parseImage(input) {
   let img;
   try {
     img = decodePng(buf);
-  } catch {
+  } catch (error) {
+    if (error && error.message === "chunk_crc_mismatch") {
+      fail(400, "image_checksum_failed", "图像分块校验和错误：文件已损坏，请重新导出");
+    }
     fail(400, "image_decode_failed", "无法解析图像：仅支持非隔行扫描的 PNG 图像");
   }
   if (img.width < MIN_DIM || img.height < MIN_DIM || img.width > MAX_DIM || img.height > MAX_DIM) {
@@ -196,6 +199,9 @@ const page = `<!doctype html>
     const stats = document.querySelector("#stats");
     const samplesEl = document.querySelector("#samples");
     let samples = [];
+    function esc(s) {
+      return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
     async function api(path, options) {
       const res = await fetch(path, options && options.body ? { ...options, headers:{ "Content-Type":"application/json" } } : options);
       const data = await res.json();
@@ -203,7 +209,7 @@ const page = `<!doctype html>
       return data;
     }
     function analysisPanelHtml(sampleId, sliceId) {
-      const key = sampleId + "|" + sliceId;
+      const key = esc(sampleId + "|" + sliceId);
       return '<div class="analysis"><b>薄片显微图像分析</b>' +
         '<div class="meta">上传薄片图像，按颜色阈值提取矿物颗粒，统计粒径分布与面积占比</div>' +
         '<input type="file" accept="image/png" data-file="' + key + '">' +
@@ -221,26 +227,26 @@ const page = `<!doctype html>
       const bars = r.distribution.map(function(b){
         return '<div class="bar-row"><span class="bar-label">' + b.from + '–' + b.to + ' µm</span><span class="bar-track"><span class="bar-fill" style="width:' + Math.round(b.count / maxCount * 100) + '%"></span></span><span class="bar-count">' + b.count + '</span></div>';
       }).join("");
-      return '<div class="an-card" data-an="' + a.id + '"><div class="an-head"><img src="' + a.imageUrl + '" alt="薄片图像"><div>' +
-        '<b>' + (a.imageName || a.id) + '</b>' +
+      return '<div class="an-card" data-an="' + esc(a.id) + '"><div class="an-head"><img src="' + esc(a.imageUrl) + '" alt="薄片图像"><div>' +
+        '<b>' + esc(a.imageName || a.id) + '</b>' +
         '<div class="meta">' + a.width + '×' + a.height + ' · 阈值 ' + a.threshold + ' · ' + (a.polarity === "light" ? "亮色" : "暗色") + '颗粒 · 标尺 ' + a.scale.pixels + 'px=' + a.scale.microns + 'µm</div>' +
-        '<div class="meta">更新于 ' + a.updatedAt.replace("T", " ").slice(0, 19) + '</div></div></div>' +
+        '<div class="meta">更新于 ' + esc(a.updatedAt.replace("T", " ").slice(0, 19)) + '</div></div></div>' +
         '<div class="an-stats"><div><span>颗粒数</span><strong>' + r.grainCount + '</strong></div>' +
         '<div><span>矿物面积占比</span><strong>' + (r.areaFraction * 100).toFixed(1) + '%</strong></div>' +
         '<div><span>平均粒径</span><strong>' + r.meanDiameterUm + ' µm</strong></div>' +
         '<div><span>中位/最大</span><strong>' + r.medianDiameterUm + ' / ' + r.maxDiameterUm + ' µm</strong></div></div>' +
         '<div class="bars">' + (bars || '<div class="meta">阈值范围内无颗粒</div>') + '</div>' +
         '<details class="an-edit"><summary>修改阈值 / 标尺并重算</summary>' +
-        '<div class="row"><div><label>颜色阈值</label><input type="number" min="0" max="255" value="' + a.threshold + '" data-e-th="' + a.id + '"></div>' +
-        '<div><label>矿物颜色</label><select data-e-pol="' + a.id + '"><option value="dark"' + (a.polarity === "dark" ? " selected" : "") + '>暗色颗粒</option><option value="light"' + (a.polarity === "light" ? " selected" : "") + '>亮色颗粒</option></select></div></div>' +
-        '<div class="row"><div><label>标尺像素长度(px)</label><input type="number" min="1" value="' + a.scale.pixels + '" data-e-px="' + a.id + '"></div>' +
-        '<div><label>对应实际长度(µm)</label><input type="number" min="0.01" step="any" value="' + a.scale.microns + '" data-e-um="' + a.id + '"></div></div>' +
-        '<button data-recalc="' + a.id + '">重新计算</button>' +
-        '<div class="err" data-e-err="' + a.id + '"></div></details></div>';
+        '<div class="row"><div><label>颜色阈值</label><input type="number" min="0" max="255" value="' + a.threshold + '" data-e-th="' + esc(a.id) + '"></div>' +
+        '<div><label>矿物颜色</label><select data-e-pol="' + esc(a.id) + '"><option value="dark"' + (a.polarity === "dark" ? " selected" : "") + '>暗色颗粒</option><option value="light"' + (a.polarity === "light" ? " selected" : "") + '>亮色颗粒</option></select></div></div>' +
+        '<div class="row"><div><label>标尺像素长度(px)</label><input type="number" min="1" value="' + a.scale.pixels + '" data-e-px="' + esc(a.id) + '"></div>' +
+        '<div><label>对应实际长度(µm)</label><input type="number" min="0.01" step="any" value="' + a.scale.microns + '" data-e-um="' + esc(a.id) + '"></div></div>' +
+        '<button data-recalc="' + esc(a.id) + '">重新计算</button>' +
+        '<div class="err" data-e-err="' + esc(a.id) + '"></div></details></div>';
     }
     function render() {
       stats.innerHTML = statuses.map(s => '<div class="stat"><span>'+s+'</span><strong>'+samples.filter(item => item.status === s).length+'</strong></div>').join("");
-      samplesEl.innerHTML = samples.map(sample => '<article class="card"><h3>'+sample.project+'</h3><span class="pill">'+sample.status+'</span><div class="meta">'+sample.borehole+' · '+sample.coreBox+' · '+sample.depth+' · '+sample.owner+'</div><label>新增切片</label><input data-new-slice="'+sample.id+'" placeholder="切片编号"><input data-method="'+sample.id+'" placeholder="染色方法"><button data-add="'+sample.id+'">添加切片</button>'+sample.slices.map(slice => '<div class="slice"><b>'+slice.id+'</b><div class="meta">'+slice.method+' · 当前步骤 '+slice.status+'</div><select data-step="'+sample.id+'|'+slice.id+'">'+steps.map(step => '<option>'+step+'</option>').join("")+'</select><textarea data-note="'+sample.id+'|'+slice.id+'" placeholder="步骤备注或观察结果"></textarea><button data-log="'+sample.id+'|'+slice.id+'">记录步骤</button><div class="meta">'+slice.logs.map(log => log.step+"："+log.note).join(" / ")+'</div>'+(slice.status === "观察" ? analysisPanelHtml(sample.id, slice.id) : '<div class="meta">完成「观察」步骤后可上传薄片显微图像进行粒度统计</div>')+'</div>').join("")+'<button data-deliver="'+sample.id+'">标记交付</button></article>').join("");
+      samplesEl.innerHTML = samples.map(sample => '<article class="card"><h3>'+esc(sample.project)+'</h3><span class="pill">'+esc(sample.status)+'</span><div class="meta">'+esc(sample.borehole)+' · '+esc(sample.coreBox)+' · '+esc(sample.depth)+' · '+esc(sample.owner)+'</div><label>新增切片</label><input data-new-slice="'+esc(sample.id)+'" placeholder="切片编号"><input data-method="'+esc(sample.id)+'" placeholder="染色方法"><button data-add="'+esc(sample.id)+'">添加切片</button>'+sample.slices.map(slice => '<div class="slice"><b>'+esc(slice.id)+'</b><div class="meta">'+esc(slice.method)+' · 当前步骤 '+esc(slice.status)+'</div><select data-step="'+esc(sample.id)+'|'+esc(slice.id)+'">'+steps.map(step => '<option>'+esc(step)+'</option>').join("")+'</select><textarea data-note="'+esc(sample.id)+'|'+esc(slice.id)+'" placeholder="步骤备注或观察结果"></textarea><button data-log="'+esc(sample.id)+'|'+esc(slice.id)+'">记录步骤</button><div class="meta">'+slice.logs.map(log => esc(log.step)+"："+esc(log.note)).join(" / ")+'</div>'+(slice.status === "观察" ? analysisPanelHtml(sample.id, slice.id) : '<div class="meta">完成「观察」步骤后可上传薄片显微图像进行粒度统计</div>')+'</div>').join("")+'<button data-deliver="'+esc(sample.id)+'">标记交付</button></article>').join("");
       document.querySelectorAll("[data-step]").forEach(sel => {
         const [sampleId, sliceId] = sel.dataset.step.split("|");
         const slice = samples.find(s => s.id === sampleId).slices.find(s => s.id === sliceId);
@@ -294,7 +300,7 @@ const page = `<!doctype html>
             const list = await api('/api/samples/' + sample.id + '/slices/' + slice.id + '/analyses');
             box.innerHTML = list.length ? list.map(renderAnalysis).join("") : '<div class="meta">暂无分析，请上传第一张薄片图像</div>';
           } catch (e) {
-            box.innerHTML = '<div class="err">' + e.message + '</div>';
+            box.innerHTML = '<div class="err">' + esc(e.message) + '</div>';
           }
         }
       }
@@ -430,35 +436,47 @@ const server = http.createServer(async (req, res) => {
         const result = analyzeGrains(img, { threshold, polarity, umPerPx: scale.umPerPx });
         const hash = createHash("sha256").update(buf).digest("hex");
         await mkdir(uploadsDir, { recursive: true });
-        await writeFile(join(uploadsDir, `${hash}.png`), buf);
-        const now = new Date().toISOString();
-        const existing = db.analyses.find(item => item.sampleId === sample.id && item.sliceId === slice.id && item.imageHash === hash);
-        if (existing) {
-          Object.assign(existing, { threshold, polarity, scale, width: img.width, height: img.height, result, updatedAt: now });
-          if (typeof input.name === "string" && input.name) existing.imageName = input.name.slice(0, 200);
+        const imagePath = join(uploadsDir, `${hash}.png`);
+        const tmpImagePath = `${imagePath}.${process.pid}.${Date.now()}.tmp`;
+        const imageExisted = existsSync(imagePath);
+        try {
+          // 图像原子写入；记录保存失败时清理新写入的孤立文件，已有记录引用的文件不动
+          await writeFile(tmpImagePath, buf);
+          await rename(tmpImagePath, imagePath);
+          const now = new Date().toISOString();
+          const existing = db.analyses.find(item => item.sampleId === sample.id && item.sliceId === slice.id && item.imageHash === hash);
+          if (existing) {
+            Object.assign(existing, { threshold, polarity, scale, width: img.width, height: img.height, result, updatedAt: now });
+            if (typeof input.name === "string" && input.name) existing.imageName = input.name.slice(0, 200);
+            await saveDb(db);
+            return { analysis: existing, deduplicated: true };
+          }
+          const analysis = {
+            id: newId("AN"),
+            sampleId: sample.id,
+            sliceId: slice.id,
+            imageHash: hash,
+            imageUrl: `/uploads/${hash}.png`,
+            imageName: typeof input.name === "string" ? input.name.slice(0, 200) : "",
+            mineral: typeof input.mineral === "string" && input.mineral.trim() ? input.mineral.trim().slice(0, 50) : "未命名矿物",
+            width: img.width,
+            height: img.height,
+            threshold,
+            polarity,
+            scale,
+            result,
+            createdAt: now,
+            updatedAt: now
+          };
+          db.analyses.unshift(analysis);
           await saveDb(db);
-          return { analysis: existing, deduplicated: true };
+          return { analysis, deduplicated: false };
+        } catch (error) {
+          await unlink(tmpImagePath).catch(() => {});
+          if (!imageExisted) await unlink(imagePath).catch(() => {});
+          if (error && error.status) throw error;
+          fail(500, "save_failed", "保存分析记录失败，请重试");
         }
-        const analysis = {
-          id: newId("AN"),
-          sampleId: sample.id,
-          sliceId: slice.id,
-          imageHash: hash,
-          imageUrl: `/uploads/${hash}.png`,
-          imageName: typeof input.name === "string" ? input.name.slice(0, 200) : "",
-          mineral: typeof input.mineral === "string" && input.mineral.trim() ? input.mineral.trim().slice(0, 50) : "未命名矿物",
-          width: img.width,
-          height: img.height,
-          threshold,
-          polarity,
-          scale,
-          result,
-          createdAt: now,
-          updatedAt: now
-        };
-        db.analyses.unshift(analysis);
-        await saveDb(db);
-        return { analysis, deduplicated: false };
       });
       return sendJson(res, outcome.deduplicated ? 200 : 201, outcome);
     }
@@ -481,7 +499,11 @@ const server = http.createServer(async (req, res) => {
         const result = analyzeGrains(img, { threshold, polarity, umPerPx: scale.umPerPx });
         Object.assign(record, { threshold, polarity, scale, result, updatedAt: new Date().toISOString() });
         if (typeof input.mineral === "string" && input.mineral.trim()) record.mineral = input.mineral.trim().slice(0, 50);
-        await saveDb(db);
+        try {
+          await saveDb(db);
+        } catch {
+          fail(500, "save_failed", "保存分析记录失败，请重试");
+        }
         return record;
       });
       return sendJson(res, 200, { analysis, deduplicated: false });
